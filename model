@@ -1,0 +1,157 @@
+import tensorflow as tf
+from keras import layers, activations, Model, backend, Input
+
+def convblock(inp, nb_filters):
+    x = layers.Conv3D(nb_filters, 
+                      kernel_size=3, 
+                      dilation_rate=1, 
+                      dropout_rate=None, 
+                      weight_decay=1e-4,
+                      padding='same',
+                      data_format='channels_first')(inp)
+    x = layers.BatchNormalization(epsilon=1.1e-5)(x)
+    x = layers.ReLU()(x)
+    x = layers.Dropout(0.25)(x)
+    return x
+
+def downsampleblock(inp):
+    x = layers.AveragePooling3D(pool_size=2, 
+                            strides=2, 
+                            padding='same',
+                            data_format='channels_first')(inp)
+    x = layers.BatchNormalization(epsilon=1.1e-5)(x)
+    x = layers.ReLU()(x)
+    x = layers.Dropout(0.25)(x)
+    return x
+    
+def deconvblock(inp, nb_filters):
+    x = layers.Conv3DTranspose(nb_filters,
+                               kernel_size=3,
+                               strides=2,
+                               weight_decay=1e-4,
+                               padding='same',
+                               data_format='channels_first')(inp)
+    x = layers.ReLU()(x)
+    return x
+
+def sigmoidblock(inp, nb_filters):
+    x = layers.Conv3D(nb_filters, 
+                     kernel_size=3, 
+                     dilation_rate=1, 
+                     dropout_rate=None, 
+                     weight_decay=1e-4,
+                     padding='same',
+                     data_format='channels_first')(inp)
+    x = activations.sigmoid(x)
+    return x
+
+def gatingblock(inp, nb_filters):
+    x = layers.Conv3D(nb_filters, 
+                      kernel_size=1, 
+                      padding='same',
+                      data_format='channels_first')(inp)
+    x = layers.BatchNormalization(epsilon=1.1e-5)(x)
+    x = layers.ReLU()(x)
+    return x
+
+def res(inp1, inp2):
+    residual = inp2 + inp1
+    return residual
+
+def attentionblock(x, g, nb_filters):
+    xshape = backend.int_shape(x)
+    gshape = backend.int_shape(g)
+    xtheta = layers.Conv3D(nb_filters,
+                           kernel_size=2,
+                           strides=2,
+                           padding='same',
+                           data_format='channels_first')(x)
+    xthetashape = backend.int_shape(xtheta)
+    gphi = layers.Conv3D(nb_filters,
+                         kernel_size=1,
+                         padding='same',
+                         data_format='channels_first')(g)
+    gupsample = layers.Conv3DTranspose(nb_filters, kernel_size=3,
+                                       strides=(xthetashape[1]//gshape[1], xthetashape[2]//gshape[2], xthetashape[3]//gshape[3]),
+                                       padding='same',
+                                       data_format='channels_first')(gphi)
+    concat_xg = layers.add([gupsample, xtheta])
+    activation = layers.Activation('relu')(concat_xg)
+    psi = layers.Conv3D(1,
+                        kernel_size=1,
+                        padding='same',
+                        data_format='channels_first')(activation)
+    sigmoid_xg = layers.Activation('sigmoid')(psi)
+    shape_sigmoid = backend.int_shape(sigmoid_xg)
+    psiupsample = layers.UpSampling3D(size=(xshape[1]//shape_sigmoid[1], xshape[2]//shape_sigmoid[2], xshape[3]//shape_sigmoid[3]))
+    gat_x = tf.multiply(psiupsample,x)
+    gat_x_out = layers.Conv3D(xshape[4],
+                              kernel_size=1,
+                              padding='same',
+                              data_format='channels_first')(gat_x)
+    gat_x_out = layers.BatchNormalization()(gat_x_out)
+    return gat_x_out
+
+def vnet(x, n_class):
+    l1 = convblock(x, 16)
+    l2 = convblock(l1, 16)
+    l3 = res(l2,l1)
+    l4 = downsampleblock(l3)
+    l5 = convblock(l4, 32)
+    l6 = convblock(l5, 32)
+    l7 = res(l4, l6)
+    l8 = downsampleblock(l7)
+    l9 = convblock(l8, 64)
+    l10 = convblock(l9, 64)
+    l11 = convblock(l10, 64)
+    l12 = res(l8, l11)
+    l13 = downsampleblock(l12)
+    l14 = convblock(l13, 128)
+    l15 = convblock(l14, 128)
+    l16 = convblock(l15, 128)
+    l17 = res(l13, l16)
+    l18 = downsampleblock(l17)
+    l19 = convblock(l18, 256)
+    l20 = convblock(l19, 256)
+    l21 = convblock(l20, 256)
+    l22 = res(l18, l21)
+    g1 = gatingblock(l22, 128)
+    attn1 = attentionblock(l17, g1, 128)
+    deconv1 = deconvblock(l22, 256)
+    concat1 = layers.concatenate([deconv1, attn1], axis=0)
+    l23 = convblock(concat1, 128)
+    l24 = convblock(l23, 128)
+    l25 = convblock(l24, 128)
+    l26 = res(deconv1, l25)
+    g2 = gatingblock(l26, 64)
+    attn2 = attentionblock(l12, g2, 64)
+    deconv2 = deconvblock(l26, 128)
+    concat2 = layers.concatenate([deconv2, attn2], axis=0)
+    l27 = convblock(concat2, 64)
+    l28 = convblock(l27, 64)
+    l29 = convblock(l28, 64)
+    l30 = res(deconv2, l29)
+    g3 = gatingblock(l30, 32)
+    attn3 = attentionblock(l7, g3, 32)
+    deconv3 = deconvblock(l30, 64)
+    concat3 = layers.concatenate([deconv3, attn3], axis=0)
+    l31 = convblock(concat3, 32)
+    l32 = convblock(l31, 32)
+    l33 = convblock(l32, 32)
+    l34 = res(deconv3, l33)
+    g4 = gatingblock(l34, 16)
+    attn4 = attentionblock(l3, g4, 16)
+    deconv4 = deconvblock(l34, 32)
+    concat4 = layers.concatenate([deconv4, attn4], axis=0)
+    l35 = convblock(concat4, 16)
+    l36 = convblock(l35, 16)
+    l37 = convblock(l36, 16)
+    l38 = res(deconv4, l37)
+    l39 = sigmoidblock(l38, n_class)
+    model = Model(x, l39, name='attnvnet')
+    return model
+
+
+# DEMO
+inputs = Input(shape=[1,36,36,12], name='CT')
+attnvnet = vnet(inputs, 1)
